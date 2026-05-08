@@ -22,10 +22,45 @@ def chat(messages: list) -> str:
     return response.choices[0].message.content
 
 
+def handle_command(user_input: str, memory: Memory) -> bool:
+    """Handle /commands. Returns True if input was a command (skip LLM call)."""
+    if user_input == "/sessions":
+        sessions = memory.list_sessions()
+        if not sessions:
+            print("No sessions found.\n")
+        else:
+            print(f"\n{'ID':<36}  {'Date':<20}  {'Msgs':>4}  Preview")
+            print("-" * 80)
+            for s in sessions:
+                date = s["created_at"][:19].replace("T", " ")
+                preview = (s["preview"] or "")[:30]
+                print(f"{s['id']}  {date}  {s['message_count']:>4}  {preview}")
+            print()
+        return True
+
+    if user_input.startswith("/resume "):
+        session_id = user_input.split(" ", 1)[1].strip()
+        if memory.resume_session(session_id):
+            count = len(memory.get_history())
+            print(f"Resumed session {session_id}. {count} messages loaded.\n")
+        else:
+            print(f"Session not found: {session_id}\n")
+        return True
+
+    if user_input == "/help":
+        print("\nCommands:")
+        print("  /sessions        — list all past sessions")
+        print("  /resume <id>     — continue a past session")
+        print("  quit             — exit\n")
+        return True
+
+    return False
+
+
 def main():
     memory = Memory(HISTORY_DIR)
 
-    print("Chat agent ready. Type 'quit' to exit.\n")
+    print("Chat agent ready. Type /help for commands or 'quit' to exit.\n")
 
     while True:
         user_input = input("You: ").strip()
@@ -33,6 +68,8 @@ def main():
             continue
         if user_input.lower() == "quit":
             break
+        if handle_command(user_input, memory):
+            continue
 
         messages = [{"role": "system", "content": "You are a helpful assistant."}]
         messages += [
