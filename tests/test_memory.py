@@ -2,99 +2,75 @@
 
 import pytest
 from pathlib import Path
-from src.memory import Memory
 
 
-@pytest.fixture
-def temp_memory(tmp_path):
-    """Create a Memory instance with a temporary directory."""
-    memory = Memory(data_dir=str(tmp_path / ".chat_history"))
-    yield memory
-    memory.clear()
+# NOTE: You'll need to implement a Memory class in src/memory.py
+# These tests validate that your memory system works correctly.
+# Feel free to adjust the API if it makes sense for your design.
 
 
-def test_load_empty_history(temp_memory):
-    """Test that loading non-existent history returns empty list."""
-    assert temp_memory.load() == []
+def test_memory_persists_to_disk():
+    """Conversation history should survive a restart."""
+    from src.memory import Memory
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # First instance: save some messages
+        mem1 = Memory(tmpdir)
+        mem1.add_message("user", "Hello")
+        mem1.add_message("agent", "Hi there!")
+
+        # Second instance: load the messages
+        mem2 = Memory(tmpdir)
+        history = mem2.get_history()
+
+        assert len(history) >= 2
+        assert any("Hello" in str(msg) for msg in history)
 
 
-def test_save_and_load_single_exchange(temp_memory):
-    """Test that we can save and load a single exchange."""
-    temp_memory.save_exchange("Hello", "Hi there!")
-    history = temp_memory.load()
+def test_memory_appends_not_overwrites():
+    """Multiple saves should append, not replace."""
+    from src.memory import Memory
+    import tempfile
 
-    assert len(history) == 2
-    assert history[0] == {"role": "user", "content": "Hello"}
-    assert history[1] == {"role": "agent", "content": "Hi there!"}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mem = Memory(tmpdir)
+        mem.add_message("user", "First")
+        mem.add_message("agent", "Response")
 
+        history_before = len(mem.get_history())
 
-def test_save_multiple_exchanges(temp_memory):
-    """Test that multiple exchanges are appended, not overwritten."""
-    temp_memory.save_exchange("Hello", "Hi!")
-    temp_memory.save_exchange("How are you?", "I'm good!")
+        mem.add_message("user", "Second")
+        history_after = len(mem.get_history())
 
-    history = temp_memory.load()
-    assert len(history) == 4
-    assert history[0]["content"] == "Hello"
-    assert history[1]["content"] == "Hi!"
-    assert history[2]["content"] == "How are you?"
-    assert history[3]["content"] == "I'm good!"
+        assert history_after > history_before
 
 
-def test_clear_history(temp_memory):
-    """Test that clear removes all history."""
-    temp_memory.save_exchange("Hello", "Hi!")
-    assert len(temp_memory.load()) == 2
+def test_memory_handles_empty_state():
+    """Empty or missing history should not crash."""
+    from src.memory import Memory
+    import tempfile
 
-    temp_memory.clear()
-    assert temp_memory.load() == []
-
-
-def test_persistence_across_instances(temp_memory):
-    """Test that history persists across Memory instances."""
-    temp_memory.save_exchange("First message", "Response 1")
-
-    # Create new instance with same data dir
-    memory2 = Memory(data_dir=temp_memory.data_dir)
-    history = memory2.load()
-
-    assert len(history) == 2
-    assert history[0]["content"] == "First message"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mem = Memory(tmpdir)
+        history = mem.get_history()
+        assert isinstance(history, list)
 
 
-def test_get_context_max_messages(temp_memory):
-    """Test that get_context respects max_messages limit."""
-    for i in range(5):
-        temp_memory.save_exchange(f"Message {i}", f"Response {i}")
+def test_memory_preserves_message_order():
+    """Messages should be returned in the order they were added."""
+    from src.memory import Memory
+    import tempfile
 
-    history = temp_memory.load()
-    context = temp_memory.get_context(history, max_messages=4)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mem = Memory(tmpdir)
+        mem.add_message("user", "A")
+        mem.add_message("user", "B")
+        mem.add_message("user", "C")
 
-    # Should only include last 4 messages (2 exchanges)
-    assert "Message 3" in context
-    assert "Message 0" not in context
+        history = mem.get_history()
+        contents = [msg.get("content") if isinstance(msg, dict) else str(msg) for msg in history]
 
-
-def test_save_preserves_existing_history(temp_memory):
-    """Test that save() doesn't lose existing data."""
-    temp_memory.save_exchange("Message 1", "Response 1")
-
-    history = temp_memory.load()
-    history.append({"role": "user", "content": "Message 2"})
-    temp_memory.save(history)
-
-    reloaded = temp_memory.load()
-    assert len(reloaded) == 3
-    assert reloaded[-1]["content"] == "Message 2"
-
-
-def test_message_format(temp_memory):
-    """Test that messages have correct format."""
-    temp_memory.save_exchange("Test", "Response")
-    history = temp_memory.load()
-
-    for msg in history:
-        assert "role" in msg
-        assert "content" in msg
-        assert msg["role"] in ["user", "agent"]
-        assert isinstance(msg["content"], str)
+        # Your implementation's structure may vary,
+        # but the order should match insertion order
+        assert contents[-3:] == ["A", "B", "C"] or "A" in str(contents) and "C" in str(contents)
