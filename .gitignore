@@ -1,4 +1,30 @@
+# Secrets & credentials
 .env
+.env.*
+
+# Local Claude Code settings (may contain personal permissions)
+.claude/settings.local.json
+
+# Python
 .venv/
-__pycache__/
+**/__pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Test cache
+.pytest_cache/
+
+# Runtime data created by memory.py
+*.db
+*.db.corrupt
+*.jsonl
+*.jsonl.bak
+
+# macOS
+.DS_Store
+
+# Personal notes (not part of the shared codebase)
+INTERVIEW_FEEDBACK.md
+STUDY_PLAN.md
+TODO.md

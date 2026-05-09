@@ -1,6 +1,7 @@
 """Persistent conversation memory backed by SQLite."""
 
 import json
+import shutil
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -19,15 +20,35 @@ class Memory:
         self._session_id = str(uuid.uuid4())
         self._session_created = False
 
-        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn = self._open_connection()
         self._setup_schema()
 
         jsonl_path = directory / "history.jsonl"
         if jsonl_path.exists():
             self._migrate_jsonl(jsonl_path)
+
+    def _open_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
+    def _handle_corruption(self):
+        """Rename corrupt DB and open a fresh one."""
+        corrupt_path = self._db_path.with_suffix(".db.corrupt")
+        print(f"\nWarning: database is corrupted. Renaming to {corrupt_path.name} and starting fresh.")
+        print("Your previous history may be recoverable from that file.\n")
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        if self._db_path.exists():
+            shutil.move(str(self._db_path), str(corrupt_path))
+        self._conn = self._open_connection()
+        self._session_id = str(uuid.uuid4())
+        self._session_created = False
+        self._setup_schema()
 
     def _setup_schema(self):
         self._conn.executescript("""
@@ -107,42 +128,63 @@ class Memory:
         now = _now()
         msg_id = str(uuid.uuid4())
 
-        with self._conn:
-            if not self._session_created:
-                preview = content[:120] if role == "user" else ""
-                self._conn.execute(
-                    "INSERT INTO sessions(id, created_at, message_count, preview) VALUES (?,?,?,?)",
-                    (self._session_id, now, 0, preview),
-                )
-                self._session_created = True
+        try:
+            with self._conn:
+                if not self._session_created:
+                    preview = content[:120] if role == "user" else ""
+                    self._conn.execute(
+                        "INSERT INTO sessions(id, created_at, message_count, preview) VALUES (?,?,?,?)",
+                        (self._session_id, now, 0, preview),
+                    )
+                    self._session_created = True
 
-            self._conn.execute(
-                "INSERT INTO messages(id, session_id, role, content, created_at) VALUES (?,?,?,?,?)",
-                (msg_id, self._session_id, role, content, now),
-            )
-            self._conn.execute(
-                "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
-                (self._session_id,),
-            )
+                self._conn.execute(
+                    "INSERT INTO messages(id, session_id, role, content, created_at) VALUES (?,?,?,?,?)",
+                    (msg_id, self._session_id, role, content, now),
+                )
+                self._conn.execute(
+                    "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
+                    (self._session_id,),
+                )
+        except sqlite3.DatabaseError:
+            print("Warning: your last message was not saved — the database may be corrupted.")
+            print("Try sending it again. If this keeps happening, restart the app.\n")
+        except sqlite3.OperationalError:
+            self._handle_corruption()
 
     def get_history(self) -> list:
-        rows = self._conn.execute(
-            "SELECT id, role, content, created_at FROM messages ORDER BY created_at ASC",
-        ).fetchall()
-        return [dict(r) for r in rows]
+        # TODO: need deep dive — locked DB (OperationalError with "locked") should retry, not trigger corruption handling
+        try:
+            rows = self._conn.execute(
+                "SELECT id, role, content, created_at FROM messages ORDER BY created_at ASC",
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.DatabaseError:
+            self._handle_corruption()
+            return []
 
     def get_recent(self, n: int = 20) -> list:
-        rows = self._conn.execute(
-            "SELECT role, content FROM messages WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
-            (self._session_id, n),
-        ).fetchall()
-        return [dict(r) for r in reversed(rows)]
+        # TODO: need deep dive — locked DB (OperationalError with "locked") should retry, not trigger corruption handling
+        try:
+            rows = self._conn.execute(
+                "SELECT role, content FROM messages WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
+                (self._session_id, n),
+            ).fetchall()
+            return [dict(r) for r in reversed(rows)]
+        except sqlite3.DatabaseError:
+            self._handle_corruption()
+            return []
 
     def list_sessions(self) -> list:
-        rows = self._conn.execute(
-            "SELECT id, created_at, message_count, preview FROM sessions ORDER BY created_at DESC",
-        ).fetchall()
-        return [dict(r) for r in rows]
+        # TODO: need deep dive — locked DB (OperationalError with "locked") should retry, not trigger corruption handling
+        try:
+            rows = self._conn.execute(
+                "SELECT id, created_at, message_count, preview FROM sessions ORDER BY created_at DESC",
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.DatabaseError:
+            self._handle_corruption()
+            return []
 
     def resume_session(self, session_id: str) -> bool:
         row = self._conn.execute(
