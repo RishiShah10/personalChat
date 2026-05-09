@@ -58,7 +58,7 @@ def handle_command(user_input: str, memory: Memory) -> bool:
 
 
 def main():
-    memory = Memory(HISTORY_DIR)
+    memory = Memory(HISTORY_DIR, api_key=os.environ["OPENAI_API_KEY"])
 
     print("Chat agent ready. Type /help for commands or 'quit' to exit.\n")
 
@@ -71,11 +71,26 @@ def main():
         if handle_command(user_input, memory):
             continue
 
-        messages = [{"role": "system", "content": "You are a helpful assistant."}]
-        messages += [
-            {"role": m["role"], "content": m["content"]}
-            for m in memory.get_recent(20)
+        # Sliding window — last 20 messages for recency
+        recent = memory.get_recent(20)
+        recent_ids = {m["id"] for m in recent}  # message IDs already in the window
+
+        # RAG — top 5 full messages whose chunks matched the query
+        # deduplicate by id so we don't send a message already in the sliding window
+        relevant = [
+            m for m in memory.get_relevant(user_input, n=5)
+            if m["id"] not in recent_ids
         ]
+
+        messages = [{"role": "system", "content": "You are a helpful assistant."}]
+        if relevant:
+            # Label RAG chunks clearly so the model knows they're retrieved context
+            messages.append({
+                "role": "system",
+                "content": "Relevant context from earlier in the conversation:\n" +
+                           "\n".join(f"[{m['role']}]: {m['content']}" for m in relevant)
+            })
+        messages += [{"role": m["role"], "content": m["content"]} for m in recent]
         messages.append({"role": "user", "content": user_input})
 
         reply = chat(messages)

@@ -15,11 +15,12 @@
 # Test cache
 .pytest_cache/
 
-# Runtime data created by memory.py
+# Runtime data created by memory.py / embedding.py
 *.db
 *.db.corrupt
 *.jsonl
 *.jsonl.bak
+chroma/
 
 # macOS
 .DS_Store

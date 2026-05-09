@@ -1,4 +1,4 @@
-"""Persistent conversation memory backed by SQLite."""
+"""Persistent conversation memory backed by SQLite + Chroma vector store."""
 
 import json
 import shutil
@@ -6,6 +6,9 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
+
+from .embedding import chunk_text, embed, init_chroma
 
 
 def _now() -> str:
@@ -13,15 +16,19 @@ def _now() -> str:
 
 
 class Memory:
-    def __init__(self, directory):
+    def __init__(self, directory, api_key: Optional[str] = None):
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         self._db_path = directory / "history.db"
         self._session_id = str(uuid.uuid4())
         self._session_created = False
+        self._api_key = api_key  # passed through to embed() calls
 
         self._conn = self._open_connection()
         self._setup_schema()
+
+        # Chroma lives alongside the SQLite DB in the same directory
+        self._chroma = init_chroma(directory)
 
         jsonl_path = directory / "history.jsonl"
         if jsonl_path.exists():
@@ -149,8 +156,59 @@ class Memory:
         except sqlite3.DatabaseError:
             print("Warning: your last message was not saved — the database may be corrupted.")
             print("Try sending it again. If this keeps happening, restart the app.\n")
+            return
         except sqlite3.OperationalError:
             self._handle_corruption()
+            return
+
+        # Chunk + embed after successful SQLite write
+        self._store_embeddings(msg_id, role, content)
+
+    def _store_embeddings(self, msg_id: str, role: str, content: str):
+        """Chunk message, embed each chunk, store in Chroma."""
+        chunks = chunk_text(content)
+        for i, chunk in enumerate(chunks):
+            try:
+                vector = embed(chunk, api_key=self._api_key)
+                self._chroma.add(
+                    ids=[f"{msg_id}_chunk_{i}"],
+                    embeddings=[vector],
+                    documents=[chunk],
+                    # metadata lets us filter by session so RAG stays session-scoped
+                    metadatas=[{"session_id": self._session_id, "role": role, "chunk_index": i, "message_id": msg_id}],
+                )
+            except Exception as e:
+                # Embedding failure is non-fatal — SQLite already has the message
+                print(f"Warning: could not embed chunk {i} of message — {e}")
+
+    def get_relevant(self, query: str, n: int = 5) -> list:
+        """Find top-n similar chunks, then fetch their full messages from SQLite."""
+        try:
+            query_vector = embed(query, api_key=self._api_key)
+            results = self._chroma.query(
+                query_embeddings=[query_vector],
+                n_results=n,
+                where={"session_id": self._session_id},  # stay within current session
+            )
+
+            # Collect unique message IDs from the matched chunks
+            message_ids = list({meta["message_id"] for meta in results["metadatas"][0]})
+
+            if not message_ids:
+                return []
+
+            # Fetch full messages from SQLite using those IDs
+            placeholders = ",".join("?" * len(message_ids))
+            rows = self._conn.execute(
+                f"SELECT id, role, content FROM messages WHERE id IN ({placeholders}) ORDER BY created_at ASC",
+                message_ids,
+            ).fetchall()
+
+            return [dict(r) for r in rows]
+        except Exception as e:
+            # RAG failure is non-fatal — fall back to sliding window only
+            print(f"Warning: RAG retrieval failed — {e}")
+            return []
 
     def get_history(self) -> list:
         # TODO: need deep dive — locked DB (OperationalError with "locked") should retry, not trigger corruption handling
@@ -167,7 +225,7 @@ class Memory:
         # TODO: need deep dive — locked DB (OperationalError with "locked") should retry, not trigger corruption handling
         try:
             rows = self._conn.execute(
-                "SELECT role, content FROM messages WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
+                "SELECT id, role, content FROM messages WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
                 (self._session_id, n),
             ).fetchall()
             return [dict(r) for r in reversed(rows)]
